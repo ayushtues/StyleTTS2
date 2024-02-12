@@ -163,10 +163,10 @@ def main(config_path):
         n_down = model.text_aligner.n_down
     
     # wrapped losses for compatibility with mixed precision
-    stft_loss = MultiResolutionSTFTLoss().to(device)
-    gl = GeneratorLoss(model.mpd, model.msd).to(device)
-    dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, 
+    stft_loss = MultiResolutionSTFTLoss().to(device) # loss b/w generated mel and gt mel
+    gl = GeneratorLoss(model.mpd, model.msd).to(device) # MPD and MSD loss from passing generated wav through MPD/MDS disc + feature matching loss b/w gt and generated wav
+    dl = DiscriminatorLoss(model.mpd, model.msd).to(device) # MPD and MSD loss by passing real and generated wav through MPD/MDS disc 
+    wl = WavLMLoss(model_params.slm.model,  # feature matching loss from WavLM b/w real and generated wav
                    model.wd, 
                    sr, 
                    model_params.slm.sr).to(device)
@@ -186,6 +186,7 @@ def main(config_path):
                 mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
+            # get alignments from mels and text, using ASR model
             ppgs, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
 
             s2s_attn = s2s_attn.transpose(-1, -2)
@@ -198,15 +199,17 @@ def main(config_path):
                 attn_mask = (attn_mask < 1)
 
             s2s_attn.masked_fill_(attn_mask, 0.0)
-                        
+
+            # generate monotnoic alignments from attention alignments 
             with torch.no_grad():
                 mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
                 s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
 
-            # encode
+            # encode the text
             t_en = model.text_encoder(texts, input_lengths, text_mask)
 
-            # 50% of chance of using monotonic version
+            # align and (probably) expand the encoder states using the attention/monotonic alignments
+            # 50% of chance of using monotonic version # TODO - Get more clarity on this
             if bool(random.getrandbits(1)):
                 asr = (t_en @ s2s_attn)
             else:
@@ -217,10 +220,10 @@ def main(config_path):
             mel_len = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
         
-            en = []
-            gt = []
-            wav = []
-            st = []
+            en = [] # encoder states
+            gt = [] # ground truth mels
+            wav = [] # ground truth wavs
+            st = [] # style reference mel speech seqeuence, for style encoder, different from the GT
             
             for bib in range(len(mel_input_length)):
                 mel_length = int(mel_input_length[bib].item() / 2)
@@ -229,7 +232,8 @@ def main(config_path):
                 en.append(asr[bib, :, random_start:random_start+mel_len])
                 gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
 
-                y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+                # 300 is hop length
+                y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300] #TODO - Why * 2 ?
                 wav.append(torch.from_numpy(y).to(device))
                 
                 # style reference (better to be different from the GT)
@@ -245,17 +249,20 @@ def main(config_path):
             # clip too short to be used by the style encoder
             if gt.shape[-1] < 80:
                 continue
-                
+            
+            # in first stage, we use GT pitch (extracted from pitch extractor though) and energy
             with torch.no_grad():    
-                real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach()
-                F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
-                
+                real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach() # energy
+                F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1)) # pitch
+            
+            #TODO interesting, if multispeaker we use st, else gt mels
             s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
             
+            # decode to get the generated wavs
             y_rec = model.decoder(en, F0_real, real_norm, s)
             
             # discriminator loss
-            
+            # disc loss is only used after TMA_epoch
             if epoch >= TMA_epoch:
                 optimizer.zero_grad()
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
@@ -270,6 +277,7 @@ def main(config_path):
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
             
             if epoch >= TMA_epoch: # start TMA training
+                # CE loss b/w ASR predictions and GT text acting as soft alignment loss 
                 loss_s2s = 0
                 for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
                     loss_s2s += F.cross_entropy(_s2s_pred[:_text_length], _text_input[:_text_length])
