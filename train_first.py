@@ -170,7 +170,8 @@ def main(config_path):
                    model.wd, 
                    sr, 
                    model_params.slm.sr).to(device)
-
+    
+    # before TMA epochs, we only have STFT loss b/w reconstructed wav and GT, and only text, style encoder and decoder are trained
     for epoch in range(start_epoch, epochs):
         running_loss = 0
         start_time = time.time()

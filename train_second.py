@@ -31,6 +31,8 @@ from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSche
 
 from optimizers import build_optimizer
 
+# DP - Thread based
+# DDP- Process based, less 
 # simple fix for dataparallel that allows access to class attributes
 class MyDataParallel(torch.nn.DataParallel):
     def __getattr__(self, name):
@@ -278,10 +280,12 @@ def main(config_path):
                 mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
                 s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
 
+                # During stage 2, we only use Mono, since we aren't training TMA anymore
                 # encode
                 t_en = model.text_encoder(texts, input_lengths, text_mask)
                 asr = (t_en @ s2s_attn_mono)
 
+                # create GT for duration prediction
                 d_gt = s2s_attn_mono.sum(axis=-1).detach()
                 
                 # compute reference styles
@@ -291,7 +295,7 @@ def main(config_path):
                     ref = torch.cat([ref_ss, ref_sp], dim=1)
 
             # compute the style of the entire utterance
-            # this operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
+            #TODO this operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
             ss = []
             gs = []
             for bib in range(len(mel_input_length)):
@@ -304,13 +308,14 @@ def main(config_path):
 
             s_dur = torch.stack(ss).squeeze()  # global prosodic styles
             gs = torch.stack(gs).squeeze() # global acoustic styles
-            s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
+            s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser/diffusion model
 
             bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
             
             # denoiser training
             if epoch >= diff_epoch:
+                # 3-5 diffusion steps
                 num_steps = np.random.randint(3, 5)
                 
                 if model_params.diffusion.dist.estimate_sigma_data:
