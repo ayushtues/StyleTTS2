@@ -24,6 +24,7 @@ from Modules.discriminators import MultiPeriodDiscriminator, MultiResSpecDiscrim
 from munch import Munch
 import yaml
 
+# we can either use idenitiy, preserve the temporal res or halfing it while using a conv to half the spectral channels
 class LearnedDownSample(nn.Module):
     def __init__(self, layer_type, dim_in):
         super().__init__()

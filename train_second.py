@@ -121,7 +121,7 @@ def main(config_path):
     F0_path = config.get('F0_path', False)
     pitch_extractor = load_F0_models(F0_path)
     
-    # load PL-BERT model
+    # load PL-BERT model (used to encode phonemes, main problem for mulitlingual support based on Github issues)
     BERT_path = config.get('PLBERT_dir', False)
     plbert = load_plbert(BERT_path)
     
@@ -156,6 +156,8 @@ def main(config_path):
             joint_epoch += start_epoch
             epochs += start_epoch
             
+            # predictor is prosodic style encoder
+            # style encoder is acoustic style encoder
             model.predictor_encoder = copy.deepcopy(model.style_encoder)
         else:
             raise ValueError('You need to specify the path to the first stage model.') 
@@ -171,6 +173,7 @@ def main(config_path):
     dl = MyDataParallel(dl)
     wl = MyDataParallel(wl)
     
+    #TODO - understand all the diffusion things
     sampler = DiffusionSampler(
         model.diffusion.diffusion,
         sampler=ADPM2Sampler(),
@@ -234,6 +237,7 @@ def main(config_path):
     running_std = []
     
     slmadv_params = Munch(config['slmadv_params'])
+    #TODO - understand this
     slmadv = SLMAdversarialLoss(model, wl, sampler, 
                                 slmadv_params.min_len, 
                                 slmadv_params.max_len,
@@ -318,6 +322,7 @@ def main(config_path):
                 # 3-5 diffusion steps
                 num_steps = np.random.randint(3, 5)
                 
+                #TODO - Why this?
                 if model_params.diffusion.dist.estimate_sigma_data:
                     model.diffusion.module.diffusion.sigma_data = s_trg.std(axis=-1).mean().item() # batch-wise std estimation
                     running_std.append(model.diffusion.module.diffusion.sigma_data)
